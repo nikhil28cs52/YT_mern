@@ -1,10 +1,9 @@
 const Joi= require('joi');
 const User = require('../models/user');
 const bcrypt = require('bcryptjs');
-
-const userDTO = require('../dto/user');
+const RefreshToken = require('../models/token');
 const UserDTO = require('../dto/user');
-
+const JWTService =  require('../services/JWTService')
 
 const passwordPattern = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/;
 
@@ -51,19 +50,49 @@ const authController = {
 
         // password hash
         const hashedPassword = await bcrypt.hash(password,10);
+
+        let accessToken;
+        let refreshToken;
         // store user data in db
-        const userToRegister = new User({
-            username,  
-            name,
-            email,
-            password: hashedPassword
+        let user;
+        try { 
+            const userToRegister = new User({
+                username,  
+                name,
+                email,
+                password: hashedPassword
             });
-        const user= await userToRegister.save();
+            user= await userToRegister.save();
+            //token Generation
+
+        accessToken = JWTService.signAccessToken({_id:user._id }, '30m');
+        refreshToken = JWTService.signRefreshToken({ _id:user._id},'60m');
+ 
+    } catch (error) {
+            return next(error);
+        }
+        // store refresh token
+
+        await JWTService.storeRefreshToken(refreshToken,user._id);
+
+        // send token in cookie 
+        res.cookie('accessToken',accessToken,{
+            maxAge:1000*60*60*24*7,
+            httpOnly: true
+        });
+
+        res.cookie('refreshToken',refreshToken,{
+            maxAge:1000*60*60*24*7,
+            httpOnly: true
+        })
+        // res
+
+
         // response end
 
-        const userDTO = new UserDTO(user);
+        const userDto = new UserDTO(user);
 
-        return res.status(201).json({user:userDTO});
+        return res.status(201).json({user:userDto,auth:true});
         // data validation by JOI
 
     },
@@ -114,9 +143,58 @@ const authController = {
         } catch (error) {
             return next(error);
         }
-        const userDTO = new UserDTO(user);
 
-        return res.status(200).json({user:userDTO});
+        const accessToken = JWTService.signAccessToken({_id:user._id}, '30m');
+        const refreshToken = JWTService.signRefreshToken({ _id:user._id},'60m');
+        
+        
+        //update refresh token DB
+
+        try {
+            await RefreshToken.updateOne({userId:user._id},{token:refreshToken},{upsert:true});
+        } catch (error) {
+            return next(error);
+        }
+        res.cookie('accessToken',accessToken,{
+            maxAge:1000*60*60*24*7,
+            httpOnly: true
+        });
+        res.cookie('refreshToken',refreshToken,{
+            maxAge:1000*60*60*24*7,
+            httpOnly: true
+            });
+
+        
+        const userDto = new UserDTO(user);
+
+        return res.status(200).json({user:userDto, auth:true});
+    },
+
+    async logout(req,res,next) {
+        // remove refresh token from db
+        // remove cookies
+        // return response
+
+        const {refreshToken} = req.cookies;
+
+        if (!refreshToken) {
+            const error = {
+                status: 400,
+                message:'Bad Request'
+            }
+            return next(error);
+        }
+
+        try {
+            await RefreshToken.deleteOne({token:refreshToken});
+        } catch (error) {
+            return next(error);
+        }
+
+        res.clearCookie('accessToken');
+        res.clearCookie('refreshToken');
+
+        return res.status(200).json({user:null,auth:false, msg:'Logout Successful'});
     }
 }
 module.exports = authController;
